@@ -1,5 +1,8 @@
 import os
+import faiss
 import requests
+import shutil
+import fitz  # PyMuPDF for extracting text
 import numpy as np
 from fastapi import FastAPI, HTTPException, UploadFile, File, Request
 from pydantic import BaseModel
@@ -186,17 +189,57 @@ async def summarize_with_groq(context, query):
         print(f"Error summarizing with Groq: {str(e)}")
         return "Sorry, I encountered an error while processing your request."   
 
-@app.post("/upload-pdf/")
+UPLOAD_DIR = "uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+@app.post("/upload/")
 async def upload_pdf(file: UploadFile = File(...)):
-    """Handles PDF uploads and stores extracted text in FAISS."""
+    """Handles PDF uploads, saves locally, extracts text, and stores in FAISS."""
     if not file.filename.endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Invalid file type. Please upload a PDF file.")
+    
     try:
-        print(f"Received file: {file.filename}")
-        pdf_text = extract_text_from_pdf(file.file)
+        # Save PDF locally
+        file_path = os.path.join(UPLOAD_DIR, file.filename)
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        print(f"File saved: {file_path}")
+
+        # Extract text from PDF
+        pdf_text = extract_text_from_pdf(file_path)
+        if not pdf_text.strip():
+            raise HTTPException(status_code=400, detail="Failed to extract text from PDF.")
+        
         print(f"Extracted text: {pdf_text[:100]}...")  # Print first 100 characters for verification
+
+        # Store extracted text in FAISS
         store_text_in_faiss(pdf_text)
+
         return {"message": "PDF uploaded and processed successfully!", "pdf_text": pdf_text}
+    
     except Exception as e:
         print(f"Error uploading PDF: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error processing PDF: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing PDF: {str(e)}")
+
+def extract_text_from_pdf(pdf_path):
+    """Extracts text from a PDF file using PyMuPDF (fitz)."""
+    text = ""
+    with fitz.open(pdf_path) as doc:
+        for page in doc:
+            text += page.get_text("text") + "\n"
+    return text
+
+def store_text_in_faiss(text):
+    """Stores extracted text embeddings in FAISS for retrieval."""
+    model = SentenceTransformer("all-MiniLM-L6-v2")
+    sentences = [s.strip() for s in text.split("\n") if s.strip()]  # Remove empty lines
+    if not sentences:
+        raise ValueError("No valid text extracted to store in FAISS.")
+    
+    embeddings = model.encode(sentences)
+
+    index = faiss.IndexFlatL2(embeddings.shape[1])  # Create FAISS index
+    index.add(np.array(embeddings, dtype=np.float32))
+
+    print("Text stored in FAISS successfully!")
